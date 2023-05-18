@@ -5,17 +5,20 @@ import java.util.Map;
 import java.util.ArrayList;
 import java.util.HashMap;
 
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 import gd.gov.demo.common.ClusterEnum;
-import gd.gov.demo.common.DestinationRuleLoadBalancerEnum;
-import gd.gov.demo.request.DemotePolicy;
 import gd.gov.demo.request.DestinationRuleRequest;
+import gd.gov.demo.request.FusingPolicy;
 import gd.gov.demo.request.NfcRequest;
 import gd.gov.demo.request.VirtualServiceRequest;
 import gd.gov.demo.service.IstioService;
+import gd.gov.demo.service.KubeService;
 import gd.gov.demo.util.BackendIstioClientUtil;
 import gd.gov.demo.util.DatabaseIstioClientUtil;
+import io.fabric8.istio.api.networking.v1alpha3.ConnectionPoolSettings;
+import io.fabric8.istio.api.networking.v1alpha3.ConnectionPoolSettingsBuilder;
 import io.fabric8.istio.api.networking.v1alpha3.DestinationRule;
 import io.fabric8.istio.api.networking.v1alpha3.DestinationRuleBuilder;
 import io.fabric8.istio.api.networking.v1alpha3.EnvoyFilter;
@@ -25,14 +28,20 @@ import io.fabric8.istio.api.networking.v1alpha3.EnvoyFilterPatchContext;
 import io.fabric8.istio.api.networking.v1alpha3.EnvoyFilterPatchOperation;
 import io.fabric8.istio.api.networking.v1alpha3.Gateway;
 import io.fabric8.istio.api.networking.v1alpha3.LoadBalancerSettingsSimpleLB;
+import io.fabric8.istio.api.networking.v1alpha3.TrafficPolicy;
+import io.fabric8.istio.api.networking.v1alpha3.TrafficPolicyBuilder;
 import io.fabric8.istio.api.networking.v1alpha3.VirtualService;
 import io.fabric8.istio.api.networking.v1alpha3.VirtualServiceBuilder;
 import io.fabric8.istio.api.networking.v1alpha3.VirtualServiceSpecFluent.HttpNested;
 import io.fabric8.istio.api.networking.v1alpha3.VirtualServiceFluent.SpecNested;
 import io.fabric8.istio.client.IstioClient;
+import io.fabric8.kubernetes.api.model.apps.Deployment;
 
 @Service
 public class IstioServiceImpl implements IstioService{
+    @Autowired
+    private KubeService kubeService = new KubeServiceImpl();
+
     @Override
     public Gateway getGateway(Integer clusterId) {
         Gateway gateway = null;
@@ -125,100 +134,51 @@ public class IstioServiceImpl implements IstioService{
     }
 
     public boolean applyTemplateVirtualService(Integer clusterId) {
-        ClusterEnum cluster = ClusterEnum.getById(clusterId);
-        if (cluster.equals(ClusterEnum.Backend)) {
-            IstioClient client = BackendIstioClientUtil.getClient();
-            String vsName = "server";
-            VirtualService vs = new VirtualServiceBuilder()
-                                .withNewMetadata()
-                                .withName(vsName)
-                                .endMetadata()
-                                .withNewSpec()
-                                    .addToHosts("*")
-                                    .addToGateways(vsName + "-gateway")
-                                    .addNewHttp()
-                                        .addNewMatch().withPort(443).endMatch()
-                                        .addNewRoute()
-                                            .withNewDestination()
-                                                .withHost(vsName)
-                                                .withSubset("v1")
-                                                .withNewPort()
-                                                    .withNumber(8088)
-                                                .endPort()
-                                            .endDestination()
-                                            .withWeight(40)
-                                        .endRoute()
-                                        .addNewRoute()
-                                            .withNewDestination()
-                                                .withHost(vsName)
-                                                .withSubset("v2")
-                                                .withNewPort()
-                                                    .withNumber(8088)
-                                                .endPort()
-                                            .endDestination()
-                                            .withWeight(20)
-                                        .endRoute()
-                                        .addNewRoute()
-                                            .withNewDestination()
-                                                .withHost(vsName)
-                                                .withSubset("v3")
-                                                .withNewPort()
-                                                    .withNumber(8088)
-                                                .endPort()
-                                            .endDestination()
-                                            .withWeight(40)
-                                        .endRoute()
-                                    .endHttp()
-                                .endSpec()
-                                .build();
-            client.v1alpha3().virtualServices().inNamespace("default").resource(vs).createOrReplace();
-            return true;
-        } else if (cluster.equals(ClusterEnum.Database)) {
-            IstioClient client = DatabaseIstioClientUtil.getClient();
-            String vsName = "mysql";
-            VirtualService vs = new VirtualServiceBuilder()
-                                .withNewMetadata()
-                                .withName(vsName)
-                                .endMetadata()
-                                .withNewSpec()
-                                    .addToHosts("*")
-                                    .addToGateways(vsName + "-gateway")
-                                    .addNewHttp()
-                                        .addNewRoute()
-                                            .withNewDestination()
-                                                .withHost(vsName)
-                                                .withSubset("v1")
-                                                .withNewPort()
-                                                    .withNumber(3306)
-                                                .endPort()
-                                            .endDestination()
-                                        .endRoute()
-                                        .addNewRoute()
-                                            .withNewDestination()
-                                                .withHost(vsName)
-                                                .withSubset("v2")
-                                                .withNewPort()
-                                                    .withNumber(3306)
-                                                .endPort()
-                                            .endDestination()
-                                        .endRoute()
-                                        .addNewRoute()
-                                            .withNewDestination()
-                                                .withHost(vsName)
-                                                .withSubset("v3")
-                                                .withNewPort()
-                                                    .withNumber(3306)
-                                                .endPort()
-                                            .endDestination()
-                                        .endRoute()
-                                    .endHttp()
-                                .endSpec()
-                                .build();
-            client.v1alpha3().virtualServices().inNamespace("default").resource(vs).createOrReplace();
-            return true;
-        } else {
-            return false;
+        if (clusterId == null || !clusterId.equals(1)) return false;    // 方法默认对server集群生效
+        
+        List<Deployment> deployments = kubeService.getDeployments(clusterId, "default");
+        if (deployments == null || deployments.isEmpty()) return false;
+        Integer totalReplicas = 0;
+        for (Deployment deployment : deployments) {
+            totalReplicas += deployment.getSpec().getReplicas();
         }
+        
+        String vsName = deployments.get(0).getSpec().getSelector().getMatchLabels().get("app");
+
+        HttpNested<SpecNested<VirtualServiceBuilder>> var1 = new VirtualServiceBuilder()
+                                                                .withNewMetadata()
+                                                                .withName(vsName)
+                                                                .endMetadata()
+                                                                .withNewSpec()
+                                                                    .addToHosts("*")
+                                                                    .addToGateways(vsName + "-gateway")
+                                                                    .addNewHttp().addNewMatch().withPort(443).endMatch();
+
+        Integer portNumber = 8088;
+        Integer totalWeight = 100;
+        for (int i = 0; i < deployments.size(); ++i) {
+            Integer weight = null;
+            // 计算服务子集的流量权重比例
+            if (i != deployments.size() - 1) {
+                weight = 100 * deployments.get(i).getSpec().getReplicas();
+            } else {
+                weight = totalWeight;
+            }
+            totalWeight -= weight;
+            
+            var1.addNewRoute()
+                    .withNewDestination()
+                        .withHost(vsName)
+                        .withSubset(deployments.get(i).getSpec().getSelector().getMatchLabels().get("version"))
+                        .withNewPort(portNumber)
+                    .endDestination()
+                    .withWeight(weight)
+                .endRoute();
+        }
+       
+        VirtualService vs = var1.endHttp().endSpec().build();
+        BackendIstioClientUtil.getClient().v1alpha3().virtualServices().inNamespace("default").resource(vs).createOrReplace();
+        return true;
     }
 
     @Override
@@ -268,73 +228,73 @@ public class IstioServiceImpl implements IstioService{
                                                                                                                         .endMetadata()
                                                                                                                         .withNewSpec()
                                                                                                                             .withHost(drName);
-        Integer globalLoadBalancerPolicy = request.getGlobalLoadBalancer();
-        if (globalLoadBalancerPolicy != null && !globalLoadBalancerPolicy.equals(0)) {
-            DestinationRuleLoadBalancerEnum globalLoadBalancer = DestinationRuleLoadBalancerEnum.getByPolicy(globalLoadBalancerPolicy);
+        String globalLoadBalancerPolicy = request.getGlobalLoadBalancer();
+        if (globalLoadBalancerPolicy != null && !globalLoadBalancerPolicy.isEmpty()) {
             var1.withNewTrafficPolicy()
                     .withNewLoadBalancer()
                         .withNewLoadBalancerSettingsSimpleLbPolicy()
-                            .withSimple(LoadBalancerSettingsSimpleLB.fromValue(globalLoadBalancer.name()))
+                            .withSimple(LoadBalancerSettingsSimpleLB.fromValue(globalLoadBalancerPolicy))
                         .endLoadBalancerSettingsSimpleLbPolicy()
                     .endLoadBalancer()
                 .endTrafficPolicy();
         }
-        List<DemotePolicy> policies = request.getPolicies();
+        
+        List<FusingPolicy> policies = request.getPolicies();
         if (policies != null && !policies.isEmpty()) {
             var1.withSubsets();
-            for (int i = 0; i < policies.size(); ++i) {
-                DemotePolicy demotePolicy = policies.get(i);
-                DestinationRuleLoadBalancerEnum localLoadBalancer = DestinationRuleLoadBalancerEnum.getByPolicy(demotePolicy.getLoadBalancer());
-                if (demotePolicy.getState()) {
-                    var1.addNewSubset()
-                            .withName(demotePolicy.getVersion())
-                            .addToLabels("version", demotePolicy.getVersion())
-                            .withNewTrafficPolicy()
-                                .withNewConnectionPool()
-                                    .withNewTcp()
-                                        .withMaxConnections(demotePolicy.getTcp_maxConnections())
-                                        .withConnectTimeout(String.valueOf(demotePolicy.getTcp_connectTimeout()) + "ms")
-                                        .withNewTcpKeepalive()
-                                            .withTime("7200s")
-                                            .withInterval("75s")
-                                        .endTcpKeepalive()
-                                    .endTcp()
-                                    .withNewHttp()
-                                        .withHttp1MaxPendingRequests(demotePolicy.getHttp_http1MaxPendingRequests())
-                                        .withMaxRequestsPerConnection(demotePolicy.getHttp_maxRequestPerConnection())
-                                    .endHttp()
-                                .endConnectionPool()
-                                .withNewOutlierDetection()
-                                    .withConsecutive5xxErrors(demotePolicy.getConsecutive5xxErrors())
-                                    .withInterval("1s")
-                                    .withBaseEjectionTime("3m")
-                                    .withMaxEjectionPercent(100)
-                                .endOutlierDetection()
-                                .withNewLoadBalancer()
-                                    .withNewLoadBalancerSettingsSimpleLbPolicy()
-                                        .withSimple(LoadBalancerSettingsSimpleLB.fromValue(localLoadBalancer.name()))
-                                    .endLoadBalancerSettingsSimpleLbPolicy()
-                                .endLoadBalancer()
-                            .endTrafficPolicy()
-                        .endSubset();
-                } else if (demotePolicy.getLoadBalancer() != null && !demotePolicy.getLoadBalancer().equals(0)) {
-                    var1.addNewSubset()
-                            .withName(demotePolicy.getVersion())
-                            .addToLabels("version", demotePolicy.getVersion())
-                            .withNewTrafficPolicy()
-                                .withNewLoadBalancer()
-                                    .withNewLoadBalancerSettingsSimpleLbPolicy()
-                                        .withSimple(LoadBalancerSettingsSimpleLB.fromValue(localLoadBalancer.name()))
-                                    .endLoadBalancerSettingsSimpleLbPolicy()
-                                .endLoadBalancer()
-                            .endTrafficPolicy()
-                        .endSubset();
-                } else {
-                    var1.addNewSubset()
-                        .withName(demotePolicy.getVersion())
-                        .addToLabels("version", demotePolicy.getVersion())
-                        .endSubset();
+            for (FusingPolicy policy : policies) {
+                TrafficPolicyBuilder trafficPolicyBuilder = new TrafficPolicyBuilder();
+                if (policy.getConnectionPool() != null) {
+                    FusingPolicy.ConnectionPool connectionPool = policy.getConnectionPool();
+                    ConnectionPoolSettingsBuilder cpsBuilder = new ConnectionPoolSettingsBuilder();
+                    if (connectionPool.getTcp_connectTimeout() != null && connectionPool.getTcp_maxConnections() != null) {
+                        cpsBuilder.withNewTcp()
+                                    .withMaxConnections(connectionPool.getTcp_maxConnections())
+                                    .withConnectTimeout(connectionPool.getTcp_connectTimeout() + "ms")
+                                    .withNewTcpKeepalive()
+                                        .withTime("7200s")
+                                        .withInterval("75s")
+                                    .endTcpKeepalive()
+                                    .endTcp();
+                    }
+
+                    if (connectionPool.getHttp_http1MaxPendingRequests() != null && connectionPool.getHttp_maxRequestPerConnection() != null) {
+                        cpsBuilder.withNewHttp()
+                                    .withHttp1MaxPendingRequests(connectionPool.getHttp_http1MaxPendingRequests())
+                                    .withMaxRequestsPerConnection(connectionPool.getHttp_maxRequestPerConnection())
+                                    .endHttp();
+                    }
+
+                    ConnectionPoolSettings connectionPoolSettings = cpsBuilder.build();
+                    if (connectionPoolSettings != null) {
+                        trafficPolicyBuilder.withConnectionPool(connectionPoolSettings);
+                    }
                 }
+
+                if (policy.getOutlierDetection() != null) {
+                    FusingPolicy.OutlierDetection outlierDetection = policy.getOutlierDetection();
+                    trafficPolicyBuilder.withNewOutlierDetection()
+                                            .withConsecutive5xxErrors(outlierDetection.getConsecutive5xxErrors())
+                                            .withInterval("1s")
+                                            .withBaseEjectionTime("3m")
+                                            .withMaxEjectionPercent(100)
+                                        .endOutlierDetection();
+                }
+
+                if (policy.getLoadBalancer() != null && !policy.getLoadBalancer().isEmpty()) {
+                    trafficPolicyBuilder.withNewLoadBalancer()
+                                            .withNewLoadBalancerSettingsSimpleLbPolicy()
+                                                .withSimple(LoadBalancerSettingsSimpleLB.fromValue(policy.getLoadBalancer()))
+                                            .endLoadBalancerSettingsSimpleLbPolicy()
+                                        .endLoadBalancer();
+                }
+
+                TrafficPolicy trafficPolicy = trafficPolicyBuilder.build();
+                var1.addNewSubset()
+                        .withName(policy.getVersion())
+                        .addToLabels("version", policy.getVersion())
+                        .withTrafficPolicy(trafficPolicy)
+                    .endSubset();
             }
         }
 
@@ -345,144 +305,24 @@ public class IstioServiceImpl implements IstioService{
 
     @Override
     public boolean applyTemplateDestinationRule(Integer clusterId) {
-        ClusterEnum cluster = ClusterEnum.getById(clusterId);
-        if (cluster.equals(ClusterEnum.Backend)) {
-            IstioClient client = BackendIstioClientUtil.getClient();
-            String drName = "server";
-            
-            DestinationRule dr = new DestinationRuleBuilder()
-                                    .withNewMetadata()
-                                        .withName(drName)
-                                    .endMetadata()
-                                    .withNewSpec()
-                                        .withHost(drName)
-                                        .withNewTrafficPolicy()
-                                            .withNewLoadBalancer()
-                                                .withNewLoadBalancerSettingsSimpleLbPolicy()
-                                                    .withSimple(LoadBalancerSettingsSimpleLB.ROUND_ROBIN)
-                                                .endLoadBalancerSettingsSimpleLbPolicy()
-                                            .endLoadBalancer()
-                                        .endTrafficPolicy()
-                                        .withSubsets()
-                                        .addNewSubset()
-                                            .withName("v1")
-                                            .addToLabels("version", "v1")
-                                            // .withNewTrafficPolicy()
-                                            //     .withNewConnectionPool()
-                                            //         .withNewTcp()
-                                            //             .withMaxConnections(5)
-                                            //             .withConnectTimeout("30ms")
-                                            //             .withNewTcpKeepalive()
-                                            //                 .withTime("7200s")
-                                            //                 .withInterval("75s")
-                                            //             .endTcpKeepalive()
-                                            //         .endTcp()
-                                            //         .withNewHttp()
-                                            //             .withHttp1MaxPendingRequests(5)
-                                            //             .withMaxRequestsPerConnection(5)
-                                            //         .endHttp()
-                                            //     .endConnectionPool()
-                                            //     .withNewOutlierDetection()
-                                            //         .withConsecutive5xxErrors(1)
-                                            //         .withInterval("1s")
-                                            //         .withBaseEjectionTime("3m")
-                                            //         .withMaxEjectionPercent(100)
-                                            //     .endOutlierDetection()
-                                            // .endTrafficPolicy()
-                                        .endSubset()
-                                        .addNewSubset()
-                                            .withName("v2")
-                                            .addToLabels("version", "v2")
-                                            // .withNewTrafficPolicy()
-                                            //     .withNewConnectionPool()
-                                            //         .withNewTcp()
-                                            //             .withMaxConnections(5)
-                                            //             .withConnectTimeout("30ms")
-                                            //             .withNewTcpKeepalive()
-                                            //                 .withTime("7200s")
-                                            //                 .withInterval("75s")
-                                            //             .endTcpKeepalive()
-                                            //         .endTcp()
-                                            //         .withNewHttp()
-                                            //             .withHttp1MaxPendingRequests(5)
-                                            //             .withMaxRequestsPerConnection(5)
-                                            //         .endHttp()
-                                            //     .endConnectionPool()
-                                            //     .withNewOutlierDetection()
-                                            //         .withConsecutive5xxErrors(1)
-                                            //         .withInterval("1s")
-                                            //         .withBaseEjectionTime("3m")
-                                            //         .withMaxEjectionPercent(100)
-                                            //     .endOutlierDetection()
-                                            // .endTrafficPolicy()
-                                        .endSubset()
-                                        .addNewSubset()
-                                            .withName("v3")
-                                            .addToLabels("version", "v3")
-                                            .withNewTrafficPolicy()
-                                                .withNewConnectionPool()
-                                                    .withNewTcp()
-                                                        .withMaxConnections(1)
-                                                        .withConnectTimeout("30ms")
-                                                        .withNewTcpKeepalive()
-                                                            .withTime("7200s")
-                                                            .withInterval("75s")
-                                                        .endTcpKeepalive()
-                                                    .endTcp()
-                                                    .withNewHttp()
-                                                        .withHttp1MaxPendingRequests(1)
-                                                        .withMaxRequestsPerConnection(1)
-                                                    .endHttp()
-                                                .endConnectionPool()
-                                                .withNewOutlierDetection()
-                                                    .withConsecutive5xxErrors(1)
-                                                    .withInterval("1s")
-                                                    .withBaseEjectionTime("3m")
-                                                    .withMaxEjectionPercent(100)
-                                                .endOutlierDetection()
-                                            .endTrafficPolicy()
-                                        .endSubset()
-                                    .endSpec()
-                                .build();
-            client.v1alpha3().destinationRules().inNamespace("default").resource(dr).createOrReplace();
-            return true;
-        } else if (cluster.equals(ClusterEnum.Database)) {
-            IstioClient client = DatabaseIstioClientUtil.getClient();
-            String drName = "mysql";
-            
-            DestinationRule dr = new DestinationRuleBuilder()
-                                    .withNewMetadata()
-                                        .withName(drName)
-                                    .endMetadata()
-                                    .withNewSpec()
-                                        .withHost(drName)
-                                        .withNewTrafficPolicy()
-                                            .withNewLoadBalancer()
-                                                .withNewLoadBalancerSettingsSimpleLbPolicy()
-                                                    .withSimple(LoadBalancerSettingsSimpleLB.ROUND_ROBIN)
-                                                .endLoadBalancerSettingsSimpleLbPolicy()
-                                            .endLoadBalancer()
-                                        .endTrafficPolicy()
-                                        .withSubsets()
-                                        .addNewSubset()
-                                            .withName("v1")
-                                            .addToLabels("version", "v1")
-                                        .endSubset()
-                                        .addNewSubset()
-                                            .withName("v2")
-                                            .addToLabels("version", "v2")
-                                        .endSubset()
-                                        .addNewSubset()
-                                            .withName("v3")
-                                            .addToLabels("version", "v3")
-                                        .endSubset()
-                                    .endSpec()
-                                .build();
-            client.v1alpha3().destinationRules().inNamespace("default").resource(dr).createOrReplace();
-            return true;
-        } else {
-            return false;
+        if (clusterId == null || !clusterId.equals(1)) return false;    // 方法默认对server集群生效
+        
+        List<Deployment> deployments = kubeService.getDeployments(clusterId, "default");
+        if (deployments == null || deployments.isEmpty()) return false;
+
+        String drName = deployments.get(0).getMetadata().getName();
+        io.fabric8.istio.api.networking.v1alpha3.DestinationRuleFluent.SpecNested<DestinationRuleBuilder> var1 = 
+                    new DestinationRuleBuilder().withNewMetadata().withName(drName).endMetadata().withNewSpec().withHost(drName).withSubsets();
+        
+        for (Deployment deployment : deployments) {
+            String version = deployment.getSpec().getSelector().getMatchLabels().get("version");
+            var1.addNewSubset().withName(version).addToLabels("version", version).endSubset();
         }
+
+        DestinationRule dr = var1.endSpec().build();
+        IstioClient client = BackendIstioClientUtil.getClient();
+        client.v1alpha3().destinationRules().inNamespace("default").resource(dr).createOrReplace();
+        return true;
     }
 
     @Override
