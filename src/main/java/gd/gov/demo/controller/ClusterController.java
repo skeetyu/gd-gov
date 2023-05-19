@@ -15,6 +15,7 @@ import gd.gov.demo.entity.JsonResult;
 import gd.gov.demo.request.ClusterIdRequest;
 import gd.gov.demo.request.DestinationRuleRequest;
 import gd.gov.demo.request.NfcRequest;
+import gd.gov.demo.request.TemplateFusingRequest;
 import gd.gov.demo.request.VirtualServiceRequest;
 import gd.gov.demo.service.IstioService;
 import gd.gov.demo.service.KubeService;
@@ -183,8 +184,8 @@ public class ClusterController {
         }
         if (sumWeights != 100) return new JsonResult<>("请确保权重之和为100");
 
-        // boolean ret = istioService.applyVirtualService(virtualServiceRequest);
-        boolean ret = true;
+        boolean ret = istioService.applyVirtualService(virtualServiceRequest);
+        // boolean ret = true;
         return new JsonResult<>(ret);
     }
 
@@ -199,8 +200,8 @@ public class ClusterController {
     public JsonResult<Boolean> applyTemplateVirtualService(@RequestBody ClusterIdRequest clusterIdRequest) {
         Integer clusterId = clusterIdRequest.getClusterId();
         if (clusterId != null && (clusterId.intValue() < 0 || clusterId.intValue() > 2)) return new JsonResult<>("clusterId非法");
-        // boolean ret = istioService.applyTemplateVirtualService(clusterId);
-        boolean ret = true;
+        boolean ret = istioService.applyTemplateVirtualService(clusterId);
+        // boolean ret = true;
         return new JsonResult<>(ret);
     }
     
@@ -233,9 +234,9 @@ public class ClusterController {
 
         if (destinationRuleRequest.getNamespace() == null || destinationRuleRequest.getNamespace().isEmpty()) destinationRuleRequest.setNamespace("default");
 
-        System.out.println(destinationRuleRequest);
-        boolean ret = true;
-        // boolean ret = istioService.applyDestinationRule(destinationRuleRequest);
+        // System.out.println(destinationRuleRequest);
+        // boolean ret = true;
+        boolean ret = istioService.applyDestinationRule(destinationRuleRequest);
         return new JsonResult<>(ret);
     }
 
@@ -251,6 +252,17 @@ public class ClusterController {
         Integer clusterId = clusterIdRequest.getClusterId();
         if (clusterId != null && (clusterId.intValue() < 0 || clusterId.intValue() > 2)) return new JsonResult<>("clusterId非法");
         boolean ret = istioService.applyTemplateDestinationRule(clusterId);
+        return new JsonResult<>(ret);
+    }
+
+    @CrossOrigin
+    @PostMapping(value = "/destinationRule/fuse/template")
+    @ResponseBody
+    public JsonResult<Boolean> applyTemplateFusePolicy(@RequestBody TemplateFusingRequest templateFusingRequest) {
+        Integer clusterId = templateFusingRequest.getClusterId();
+        if (clusterId != null && clusterId.intValue() != 1) return new JsonResult<>("clusterId非法"); // 方法默认对server集群生效
+
+        boolean ret = istioService.applyTemplateFusingPolicy(templateFusingRequest);
         return new JsonResult<>(ret);
     }
     

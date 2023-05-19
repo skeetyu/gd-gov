@@ -4,6 +4,7 @@ import java.util.List;
 
 import gd.gov.demo.request.DestinationRuleRequest;
 import gd.gov.demo.request.NfcRequest;
+import gd.gov.demo.request.TemplateFusingRequest;
 import gd.gov.demo.request.VirtualServiceRequest;
 import io.fabric8.istio.api.networking.v1alpha3.DestinationRule;
 import io.fabric8.istio.api.networking.v1alpha3.EnvoyFilter;
@@ -59,6 +60,13 @@ public interface IstioService {
      * @return 是否成功生效
      */
     public boolean applyTemplateDestinationRule(Integer clusterId);
+
+    /**
+     * 生效模板熔断策略
+     * @param request   模板熔断请求
+     * @return 是否成功生效
+     */
+    public boolean applyTemplateFusingPolicy(TemplateFusingRequest request);
 
     /**
      * 获取envoy filter列表

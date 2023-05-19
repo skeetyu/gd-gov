@@ -9,9 +9,11 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 import gd.gov.demo.common.ClusterEnum;
+import gd.gov.demo.common.TemplateFusingRequestEnum;
 import gd.gov.demo.request.DestinationRuleRequest;
 import gd.gov.demo.request.FusingPolicy;
 import gd.gov.demo.request.NfcRequest;
+import gd.gov.demo.request.TemplateFusingRequest;
 import gd.gov.demo.request.VirtualServiceRequest;
 import gd.gov.demo.service.IstioService;
 import gd.gov.demo.service.KubeService;
@@ -27,11 +29,17 @@ import io.fabric8.istio.api.networking.v1alpha3.EnvoyFilterBuilder;
 import io.fabric8.istio.api.networking.v1alpha3.EnvoyFilterPatchContext;
 import io.fabric8.istio.api.networking.v1alpha3.EnvoyFilterPatchOperation;
 import io.fabric8.istio.api.networking.v1alpha3.Gateway;
+import io.fabric8.istio.api.networking.v1alpha3.LoadBalancerSettingsSimple;
 import io.fabric8.istio.api.networking.v1alpha3.LoadBalancerSettingsSimpleLB;
+import io.fabric8.istio.api.networking.v1alpha3.Subset;
 import io.fabric8.istio.api.networking.v1alpha3.TrafficPolicy;
 import io.fabric8.istio.api.networking.v1alpha3.TrafficPolicyBuilder;
 import io.fabric8.istio.api.networking.v1alpha3.VirtualService;
 import io.fabric8.istio.api.networking.v1alpha3.VirtualServiceBuilder;
+import io.fabric8.istio.api.networking.v1alpha3.DestinationRuleSpecFluent.SubsetsNested;
+import io.fabric8.istio.api.networking.v1alpha3.LoadBalancerSettingsFluent.LoadBalancerSettingsSimpleLbPolicyNested;
+import io.fabric8.istio.api.networking.v1alpha3.TrafficPolicyFluent.ConnectionPoolNested;
+import io.fabric8.istio.api.networking.v1alpha3.TrafficPolicyFluent.OutlierDetectionNested;
 import io.fabric8.istio.api.networking.v1alpha3.VirtualServiceSpecFluent.HttpNested;
 import io.fabric8.istio.api.networking.v1alpha3.VirtualServiceFluent.SpecNested;
 import io.fabric8.istio.client.IstioClient;
@@ -160,7 +168,7 @@ public class IstioServiceImpl implements IstioService{
             Integer weight = null;
             // 计算服务子集的流量权重比例
             if (i != deployments.size() - 1) {
-                weight = 100 * deployments.get(i).getSpec().getReplicas();
+                weight = 100 * deployments.get(i).getSpec().getReplicas() / totalReplicas;
             } else {
                 weight = totalWeight;
             }
@@ -259,26 +267,28 @@ public class IstioServiceImpl implements IstioService{
                     }
 
                     if (connectionPool.getHttp_http1MaxPendingRequests() != null && connectionPool.getHttp_maxRequestPerConnection() != null) {
-                        cpsBuilder.withNewHttp()
-                                    .withHttp1MaxPendingRequests(connectionPool.getHttp_http1MaxPendingRequests())
-                                    .withMaxRequestsPerConnection(connectionPool.getHttp_maxRequestPerConnection())
-                                    .endHttp();
+                        io.fabric8.istio.api.networking.v1alpha3.ConnectionPoolSettingsFluent.HttpNested<ConnectionPoolSettingsBuilder> var2 = cpsBuilder.withNewHttp()
+                                                            .withHttp1MaxPendingRequests(connectionPool.getHttp_http1MaxPendingRequests())
+                                                            .withMaxRequestsPerConnection(connectionPool.getHttp_maxRequestPerConnection());
+                        if (connectionPool.getHttp_maxRetries() != null) var2.withMaxRetries(connectionPool.getHttp_maxRetries());
+                        var2.endHttp();
                     }
 
                     ConnectionPoolSettings connectionPoolSettings = cpsBuilder.build();
-                    if (connectionPoolSettings != null) {
+                    if (connectionPoolSettings.getHttp() != null || connectionPoolSettings.getTcp() != null) {
                         trafficPolicyBuilder.withConnectionPool(connectionPoolSettings);
                     }
                 }
 
-                if (policy.getOutlierDetection() != null) {
+                if (policy.getOutlierDetection() != null && !policy.getOutlierDetection().isEmpty()) {
                     FusingPolicy.OutlierDetection outlierDetection = policy.getOutlierDetection();
-                    trafficPolicyBuilder.withNewOutlierDetection()
-                                            .withConsecutive5xxErrors(outlierDetection.getConsecutive5xxErrors())
-                                            .withInterval("1s")
-                                            .withBaseEjectionTime("3m")
-                                            .withMaxEjectionPercent(100)
-                                        .endOutlierDetection();
+                    OutlierDetectionNested<TrafficPolicyBuilder> var3 = trafficPolicyBuilder.withNewOutlierDetection();
+                    if (outlierDetection.getConsecutiveErrors() != null) var3.withConsecutiveErrors(outlierDetection.getConsecutiveErrors());
+                    if (outlierDetection.getConsecutive5xxErrors() != null) var3.withConsecutive5xxErrors(outlierDetection.getConsecutive5xxErrors());
+                    if (outlierDetection.getInterval() != null) var3.withInterval(outlierDetection.getInterval() + "s");
+                    if (outlierDetection.getBaseEjectionTime() != null) var3.withBaseEjectionTime(outlierDetection.getBaseEjectionTime() + "s");
+                    if (outlierDetection.getMaxEjectionPercent() != null) var3.withMaxEjectionPercent(outlierDetection.getMaxEjectionPercent());
+                    var3.endOutlierDetection();
                 }
 
                 if (policy.getLoadBalancer() != null && !policy.getLoadBalancer().isEmpty()) {
@@ -290,11 +300,14 @@ public class IstioServiceImpl implements IstioService{
                 }
 
                 TrafficPolicy trafficPolicy = trafficPolicyBuilder.build();
-                var1.addNewSubset()
-                        .withName(policy.getVersion())
-                        .addToLabels("version", policy.getVersion())
-                        .withTrafficPolicy(trafficPolicy)
-                    .endSubset();
+                SubsetsNested<io.fabric8.istio.api.networking.v1alpha3.DestinationRuleFluent.SpecNested<DestinationRuleBuilder>> var2 = var1.addNewSubset()
+                                                                                                                            .withName(policy.getVersion())
+                                                                                                                            .addToLabels("version", policy.getVersion());
+                if (trafficPolicy != null && (trafficPolicy.getConnectionPool() != null || 
+                    trafficPolicy.getOutlierDetection() != null || trafficPolicy.getLoadBalancer() != null)) {
+                    var2.withTrafficPolicy(trafficPolicy);
+                }
+                var2.endSubset();
             }
         }
 
@@ -310,7 +323,7 @@ public class IstioServiceImpl implements IstioService{
         List<Deployment> deployments = kubeService.getDeployments(clusterId, "default");
         if (deployments == null || deployments.isEmpty()) return false;
 
-        String drName = deployments.get(0).getMetadata().getName();
+        String drName = deployments.get(0).getSpec().getSelector().getMatchLabels().get("app");
         io.fabric8.istio.api.networking.v1alpha3.DestinationRuleFluent.SpecNested<DestinationRuleBuilder> var1 = 
                     new DestinationRuleBuilder().withNewMetadata().withName(drName).endMetadata().withNewSpec().withHost(drName).withSubsets();
         
@@ -322,6 +335,55 @@ public class IstioServiceImpl implements IstioService{
         DestinationRule dr = var1.endSpec().build();
         IstioClient client = BackendIstioClientUtil.getClient();
         client.v1alpha3().destinationRules().inNamespace("default").resource(dr).createOrReplace();
+        return true;
+    }
+
+    @Override
+    public boolean applyTemplateFusingPolicy(TemplateFusingRequest request) {
+        DestinationRule dr = getDestinationRule(request.getClusterId());
+        if (dr == null) return false;
+
+        List<Subset> subsets = dr.getSpec().getSubsets();
+        for (int i = 0 ; i < subsets.size(); ++i) {
+            Subset subset = subsets.get(i);
+            if (subset.getLabels().getOrDefault("version", "").equals(request.getVersion())) {
+                TemplateFusingRequestEnum fusingEnum = TemplateFusingRequestEnum.getByLevel(request.getLevel());
+                if (fusingEnum == null) return false;
+
+                FusingPolicy.ConnectionPool connectionPool = fusingEnum.getConnectionPool();
+                FusingPolicy.OutlierDetection outlierDetection = fusingEnum.getOutlierDetection();
+
+                TrafficPolicyBuilder trafficPolicyBuilder = new TrafficPolicyBuilder().withNewConnectionPool()
+                                                                .withNewTcp()
+                                                                    .withMaxConnections(connectionPool.getTcp_maxConnections())
+                                                                    .withConnectTimeout(connectionPool.getTcp_connectTimeout() + "ms")
+                                                                .endTcp()
+                                                                .withNewHttp()
+                                                                    .withHttp1MaxPendingRequests(connectionPool.getHttp_http1MaxPendingRequests())
+                                                                    .withMaxRetries(connectionPool.getHttp_maxRetries())
+                                                                .endHttp()
+                                                            .endConnectionPool()
+                                                            .withNewOutlierDetection()
+                                                                .withConsecutiveErrors(outlierDetection.getConsecutiveErrors())
+                                                                .withConsecutive5xxErrors(outlierDetection.getConsecutive5xxErrors())
+                                                                .withBaseEjectionTime(outlierDetection.getBaseEjectionTime() + "s")
+                                                                .withInterval(outlierDetection.getInterval() + "s")
+                                                                .withMaxEjectionPercent(outlierDetection.getMaxEjectionPercent())
+                                                            .endOutlierDetection();
+
+                TrafficPolicy trafficPolicy = trafficPolicyBuilder.build();
+                if (subset.getTrafficPolicy() != null && subset.getTrafficPolicy().getLoadBalancer() != null) {
+                    trafficPolicy.setLoadBalancer(subset.getTrafficPolicy().getLoadBalancer());
+                }
+                
+                subset.setTrafficPolicy(trafficPolicy);
+                subsets.set(i, subset);
+            }
+        }
+        dr.getSpec().setSubsets(subsets);
+
+        IstioClient istioClient = BackendIstioClientUtil.getClient();
+        istioClient.v1alpha3().destinationRules().inNamespace("default").resource(dr).createOrReplace();  
         return true;
     }
 
